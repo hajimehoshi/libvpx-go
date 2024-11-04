@@ -9,9 +9,7 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/go-gl/gl/v3.2-core/gl"
-	"github.com/go-gl/glfw/v3.2/glfw"
-	"github.com/golang-ui/nuklear/nk"
+	"github.com/hajimehoshi/ebiten/v2"
 	"github.com/xlab/closer"
 )
 
@@ -23,7 +21,7 @@ var rateLimitDur time.Duration
 
 func init() {
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "A simple WebM player with support of VP8/VP9 video and Vorbis/Opus audio. Version: v1.0rc1\n")
+		fmt.Fprintln(os.Stderr, "A simple WebM player with support of VP8/VP9 video and Vorbis/Opus audio. Version: v1.0rc1")
 		fmt.Fprintf(os.Stderr, "Usage: %s <file1.webm> [file2.webm]\n", os.Args[0])
 		fmt.Fprintln(os.Stderr, "Specify files to read streams from, sometimes audio is stored in a separate file, use the optional argument for that.")
 		flag.PrintDefaults()
@@ -39,37 +37,6 @@ func main() {
 		log.Println("Bye!")
 	})
 
-	// Init GUI
-	if err := glfw.Init(); err != nil {
-		closer.Fatalln(err)
-	}
-	glfw.WindowHint(glfw.ContextVersionMajor, 3)
-	glfw.WindowHint(glfw.ContextVersionMinor, 2)
-	glfw.WindowHint(glfw.OpenGLProfile, glfw.OpenGLCoreProfile)
-	glfw.WindowHint(glfw.OpenGLForwardCompatible, glfw.True)
-	win, err := glfw.CreateWindow(winWidth, winHeight, s(appName), nil, nil)
-	if err != nil {
-		closer.Fatalln(err)
-	}
-	win.MakeContextCurrent()
-
-	width, height := win.GetSize()
-	log.Printf("glfw: created window %dx%d", width, height)
-
-	if err := gl.Init(); err != nil {
-		closer.Fatalln("opengl: init failed:", err)
-	}
-	gl.Viewport(0, 0, int32(width), int32(height))
-
-	ctx := nk.NkPlatformInit(win, nk.PlatformInstallCallbacks)
-	atlas := nk.NewFontAtlas()
-	nk.NkFontStashBegin(&atlas)
-	sansFont := nk.NkFontAtlasAddFromFile(atlas, s("assets/FreeSans.ttf"), 18, nil)
-	nk.NkFontStashEnd()
-	if sansFont != nil {
-		nk.NkStyleSetFont(ctx, sansFont.Handle())
-	}
-
 	// Open WebM files
 	streams := make([]io.ReadSeeker, 0, 2)
 	for _, opt := range flag.Args() {
@@ -83,18 +50,30 @@ func main() {
 		}
 	}
 	stream1, stream2 := discoverStreams(streams...)
-	vOut := make(chan Frame, 32)
-	aOut := make(chan Samples, 32)
 	if stream1 == nil {
 		closer.Fatalln("[ERR] nothing to play")
 	}
 
+	aDec := stream1.AudioDecoder()
+	if stream2 != nil {
+		aDec = stream2.AudioDecoder()
+	}
+
 	var view *View
 	if vtrack := stream1.Meta().FindFirstVideoTrack(); vtrack != nil {
-		dur := stream1.Meta().Segment.GetDuration()
-		view = NewView(win, ctx, vtrack.DisplayWidth, vtrack.DisplayHeight, dur)
+		v, err := NewView(vtrack.DisplayWidth, vtrack.DisplayHeight, stream1.VideoDecoder(), aDec)
+		if err != nil {
+			log.Println("[ERR] failed to create view:", err)
+			return
+		}
+		view = v
 	} else {
-		view = NewView(win, ctx, 0, 0, 0)
+		v, err := NewView(0, 0, nil, aDec)
+		if err != nil {
+			log.Println("[ERR] failed to create view:", err)
+			return
+		}
+		view = v
 	}
 	view.SetOnSeek(func(d time.Duration) {
 		stream1.Seek(d)
@@ -103,77 +82,9 @@ func main() {
 		}
 	})
 
-	syncC := make(chan time.Duration, 10)
-	// consume video stream
-	if stream1.VDecoder() != nil {
-		go stream1.VDecoder().Process(vOut)
-		go initVideo(view, stream1.Rebase(), syncC, vOut)
-	}
-
-	aDec := stream1.ADecoder()
-	if stream2 != nil {
-		aDec = stream2.ADecoder()
-	}
-	// consume audio stream
-	if aDec != nil {
-		initAudio(aDec.Channels(), aDec.SampleRate(), syncC, aOut)
-		go aDec.Process(aOut)
-		closer.Bind(func() {
-			aDec.Close()
-		})
-	}
-
-	exitC := make(chan struct{}, 2)
-	doneC := make(chan struct{}, 1)
-	closer.Bind(func() {
-		exitC <- struct{}{}
-		<-doneC
-	})
-	view.GUILoop(exitC, doneC)
-}
-
-func initVideo(view *View, rebaseC <-chan time.Duration, syncC chan<- time.Duration, vOut <-chan Frame) {
-	var pos time.Duration
-	var last time.Time
-	for {
-		var frame Frame
-		select {
-		case f, ok := <-vOut:
-			if !ok {
-				return
-			}
-			if last.IsZero() {
-				last = time.Now()
-				pos = frame.Timecode
-			} else {
-				// advance pos
-				now := time.Now()
-				pos += now.Sub(last)
-				last = now
-			}
-			frame = f
-		case d := <-rebaseC:
-			pos = d
-			last = time.Now()
-			syncC <- d
-			continue
-		}
-		tc := frame.Timecode
-		if pos < tc {
-			if tc-pos > 10*time.Second {
-				continue
-			} else {
-				time.Sleep(tc - pos)
-			}
-		} else if pos-tc > time.Second {
-			continue
-		}
-		// draw a frame
-		view.ShowFrame(&frame)
-		view.UpdatePos(frame.Timecode)
-		pos = frame.Timecode - time.Since(last)
-
-		// log.Printf("video frame @ %v bounds = %v", frame.Timecode, frame.Rect)
+	ebiten.SetWindowSize(winWidth, winHeight)
+	if err := ebiten.RunGame(view); err != nil {
+		log.Println("[ERR] GUI loop:", err)
 	}
 }
 
@@ -183,7 +94,9 @@ func discoverStreams(streams ...io.ReadSeeker) (Stream, Stream) {
 	if len(streams) == 0 {
 		log.Println("[WARN] no streams found")
 		return nil, nil
-	} else if len(streams) == 1 {
+	}
+
+	if len(streams) == 1 {
 		stream, err := NewStream(streams[0])
 		if err != nil {
 			log.Println("[WARN] failed to open stream:", err)
@@ -191,6 +104,7 @@ func discoverStreams(streams ...io.ReadSeeker) (Stream, Stream) {
 		}
 		return stream, nil
 	}
+
 	var stream1Video bool
 	var stream1Audio bool
 	stream1, err := NewStream(streams[0])

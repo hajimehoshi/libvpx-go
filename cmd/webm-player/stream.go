@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"io"
 	"log"
 	"time"
@@ -11,28 +10,23 @@ import (
 
 type Stream interface {
 	Meta() *webm.WebM
-	VDecoder() *VDecoder
-	ADecoder() *ADecoder
+	VideoDecoder() *VideoDecoder
+	AudioDecoder() *AudioDecoder
 	Seek(d time.Duration)
-	Rebase() <-chan time.Duration
 }
 
 type webmStream struct {
 	meta webm.WebM
-	vdec *VDecoder
-	adec *ADecoder
+	vdec *VideoDecoder
+	adec *AudioDecoder
 
 	reader *webm.Reader
-	rebase chan time.Duration
 }
 
 func NewStream(r io.ReadSeeker) (Stream, error) {
-	s := &webmStream{
-		rebase: make(chan time.Duration, 10),
-	}
+	s := &webmStream{}
 	reader, err := webm.Parse(r, &s.meta)
 	if err != nil {
-		err = fmt.Errorf("parse error: %v", err)
 		return nil, err
 	}
 	s.reader = reader
@@ -44,14 +38,20 @@ func NewStream(r io.ReadSeeker) (Stream, error) {
 		log.Printf("webm: found video track: %dx%d dur: %v %s", vtrack.DisplayWidth,
 			vtrack.DisplayHeight, s.meta.Segment.GetDuration(), vtrack.CodecID)
 
-		s.vdec = NewVDecoder(VCodec(vtrack.CodecID), vPackets)
+		s.vdec, err = NewVideoDecoer(VCodec(vtrack.CodecID), vPackets)
+		if err != nil {
+			return nil, err
+		}
 	}
 	if atrack != nil {
 		log.Printf("webm: found audio track: ch: %d %.1fHz, dur: %v, codec: %s", atrack.Channels,
 			atrack.SamplingFrequency, s.meta.Segment.GetDuration(), atrack.CodecID)
 
-		s.adec = NewADecoder(ACodec(atrack.CodecID), atrack.CodecPrivate,
+		s.adec, err = NewAudioDecoder(AudioCodec(atrack.CodecID), atrack.CodecPrivate,
 			int(atrack.Channels), int(atrack.SamplingFrequency), aPackets)
+		if err != nil {
+			return nil, err
+		}
 	}
 	go func() { // demuxer
 		for pkt := range s.reader.Chan {
@@ -80,19 +80,14 @@ func (s *webmStream) Meta() *webm.WebM {
 	return &s.meta
 }
 
-func (s *webmStream) VDecoder() *VDecoder {
+func (s *webmStream) VideoDecoder() *VideoDecoder {
 	return s.vdec
 }
 
-func (s *webmStream) ADecoder() *ADecoder {
+func (s *webmStream) AudioDecoder() *AudioDecoder {
 	return s.adec
 }
 
 func (s *webmStream) Seek(d time.Duration) {
 	s.reader.Seek(d)
-	s.rebase <- d
-}
-
-func (s *webmStream) Rebase() <-chan time.Duration {
-	return s.rebase
 }
