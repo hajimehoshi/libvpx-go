@@ -11,7 +11,6 @@ import (
 
 	"github.com/go-gl/gl/v3.2-core/gl"
 	"github.com/go-gl/glfw/v3.2/glfw"
-	"github.com/golang-ui/nuklear/nk"
 	"github.com/xlab/closer"
 )
 
@@ -61,15 +60,6 @@ func main() {
 	}
 	gl.Viewport(0, 0, int32(width), int32(height))
 
-	ctx := nk.NkPlatformInit(win, nk.PlatformInstallCallbacks)
-	atlas := nk.NewFontAtlas()
-	nk.NkFontStashBegin(&atlas)
-	sansFont := nk.NkFontAtlasAddFromFile(atlas, s("assets/FreeSans.ttf"), 18, nil)
-	nk.NkFontStashEnd()
-	if sansFont != nil {
-		nk.NkStyleSetFont(ctx, sansFont.Handle())
-	}
-
 	// Open WebM files
 	streams := make([]io.ReadSeeker, 0, 2)
 	for _, opt := range flag.Args() {
@@ -92,9 +82,9 @@ func main() {
 	var view *View
 	if vtrack := stream1.Meta().FindFirstVideoTrack(); vtrack != nil {
 		dur := stream1.Meta().Segment.GetDuration()
-		view = NewView(win, ctx, vtrack.DisplayWidth, vtrack.DisplayHeight, dur)
+		view = NewView(win, vtrack.DisplayWidth, vtrack.DisplayHeight, dur)
 	} else {
-		view = NewView(win, ctx, 0, 0, 0)
+		view = NewView(win, 0, 0, 0)
 	}
 	view.SetOnSeek(func(d time.Duration) {
 		stream1.Seek(d)
